@@ -467,16 +467,16 @@ def _predict_rsf(model, features, times):
   time point in times.
 
   """
-
-  if isinstance(times, float) or isinstance(times, int):
+  if isinstance(times, (int, float)):
     times = [float(times)]
 
-  survival_predictions = model.predict_survival_function(features.values,
-                                                         return_array=True)
-  survival_predictions = pd.DataFrame(survival_predictions,
-                                      columns=model.event_times_).T
+  survival_predictions = model.predict_survival_function(features.values, return_array=True)
+  event_times = model.event_times_ if hasattr(model, 'event_times_') else model.unique_times_
+
+  survival_predictions = pd.DataFrame(survival_predictions, columns=event_times).T
 
   return __interpolate_missing_times(survival_predictions, times)
+
 
 def _predict_dcm(model, features, times):
 

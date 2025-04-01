@@ -165,77 +165,104 @@ which to compare time-to-event."
                     size_bootstrap=size_bootstrap,
                     random_seed=i) for i in range(n_bootstrap)]
 
-def survival_regression_metric(metric, outcomes, predictions,
-                               times, outcomes_train=None, 
-                               n_bootstrap=None, random_seed=0):
-  """Compute metrics to assess survival model performance.
+def survival_regression_metric(metric, outcomes, predictions, times,
+                              outcomes_train=None, n_bootstrap=None):
+    if isinstance(times, (float,int)):
+        times = [times]
 
-  Parameters
-  -----------
-  metric: string
-      Measure used to assess the survival regression model performance.
-      Options include:
-      - `brs` : brier score
-      - `ibs` : integrated brier score
-      - `auc`: cumulative dynamic area under the curve
-      - `ctd` : concordance index inverse probability of censoring
-                weights (ipcw)
-  outcomes : pd.DataFrame
-      A pandas dataframe with rows corresponding to individual samples and
-      columns 'time' and 'event' for evaluation data.
-  predictions: np.array
-      A numpy array of survival time predictions for the samples.
-  times: np.array
-      The time points at which to compute metric value(s).
-  outcomes_train : pd.DataFrame
-      A pandas dataframe with rows corresponding to individual samples and
-      columns 'time' and 'event' for training data.
-  n_bootstrap : int, default=None
-      The number of bootstrap samples to use.
-      If None, bootrapping is not performed.
-  size_bootstrap : float, default=1.0
-      The fraction of the population to sample for each bootstrap sample.
-  random_seed: int, default=0
-      Controls the reproducibility random sampling for bootstrapping.
-  
-  Returns
-  -----------
-  float: The metric value for the specified metric.
-
-  """
-
-  if isinstance(times, (float,int)):
-    times = [times]
-
-  if outcomes_train is None:
-    outcomes_train = outcomes
-    warnings.warn("You are are evaluating model performance on the \
+    if outcomes_train is None:
+        outcomes_train = outcomes
+        warnings.warn("You are are evaluating model performance on the \
 same data used to estimate the censoring distribution.")
 
-  assert max(times) < outcomes_train.time.max(), "Times should \
+    assert max(times) < outcomes_train.time.max(), "Times should \
 be within the range of event times to avoid exterpolation."
-  assert max(times) <= outcomes.time.max(), "Times \
+    assert max(times) <= outcomes.time.max(), "Times \
 must be within the range of event times."
 
-  survival_train = util.Surv.from_dataframe('event', 'time', outcomes_train)
-  survival_test = util.Surv.from_dataframe('event', 'time', outcomes)
+    survival_train = util.Surv.from_dataframe('event', 'time', outcomes_train)
+    survival_test = util.Surv.from_dataframe('event', 'time', outcomes)
 
-  if metric == 'brs':
-    _metric = _brier_score
-  elif metric == 'ibs':
-    _metric = _integrated_brier_score
-  elif metric == 'auc':
-    _metric = _cumulative_dynamic_auc
-  elif metric == 'ctd':
-    _metric = _concordance_index_ipcw 
-  else:
-    raise NotImplementedError()
+    if metric == 'brs':
+        _metric = _brier_score
+    elif metric == 'ibs':
+        _metric = _integrated_brier_score
+    elif metric == 'auc':
+        _metric = _cumulative_dynamic_auc
+    elif metric == 'ctd':
+        _metric = _concordance_index_ipcw 
+    elif metric == 'ece':
+        _metric = _expected_calibration_error
+    else:
+        raise NotImplementedError()
 
-  if n_bootstrap is None:
-    return _metric(survival_train, survival_test, predictions, times)
-  else:
-    return [_metric(survival_train, survival_test, predictions, times, random_seed=i) for i in range(n_bootstrap)]
+    if n_bootstrap is None:
+        return _metric(survival_train, survival_test, predictions, times)
+    else:
+        return [_metric(survival_train, survival_test, predictions, times, random_seed=i) for i in range(n_bootstrap)]
 
+def _expected_calibration_error(survival_train, survival_test, predictions, times, n_bins=10, random_seed=None):
+    """
+    Compute Expected Calibration Error (ECE) for survival predictions at given times.
+    
+    Args:
+        survival_train: Survival data for training (used for IPCW weights)
+        survival_test: Survival data for testing
+        predictions: Predicted survival probabilities (n_samples, n_times)
+        times: Time points at which to evaluate ECE
+        n_bins: Number of bins to use for risk score partitioning
+        random_seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary with ECE values for each time point
+    """
+    if random_seed is not None:
+        np.random.seed(random_seed)
+        
+    # Get event indicators and times from test data
+    events = survival_test['event']
+    observed_times = survival_test['time']
+    
+    # Initialize results
+    ece_results = {}
+    
+    for i, t in enumerate(times):
+        # Get predicted probabilities for this time point
+        pred_probs = predictions[:, i]
+        
+        # Create bins based on quantiles of predicted probabilities
+        bins = np.quantile(pred_probs, np.linspace(0, 1, n_bins + 1))
+        bin_indices = np.digitize(pred_probs, bins) - 1
+        
+        # Compute observed and expected probabilities in each bin
+        bin_observed = np.zeros(n_bins)
+        bin_expected = np.zeros(n_bins)
+        bin_weights = np.zeros(n_bins)
+        
+        for j in range(n_bins):
+            mask = bin_indices == j
+            if np.sum(mask) == 0:
+                continue
+                
+            # Expected probability is the mean predicted probability in the bin
+            bin_expected[j] = np.mean(pred_probs[mask])
+            
+            # Compute observed survival using Kaplan-Meier within the bin
+            km = KaplanMeierFitter()
+            km.fit(observed_times[mask], events[mask])
+            bin_observed[j] = km.predict(t)
+            
+            # Weight by number of samples in the bin
+            bin_weights[j] = np.sum(mask)
+        
+        # Normalize weights
+        bin_weights = bin_weights / np.sum(bin_weights)
+        
+        # Compute weighted absolute differences
+        ece = np.sum(bin_weights * np.abs(bin_observed - bin_expected))
+        ece_results[t] = ece
+    
+    return ece_results
 
 def _brier_score(survival_train, survival_test, predictions, times, random_seed=None):
 
